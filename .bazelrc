@@ -21,6 +21,10 @@ build --cxxopt=-std=c++17
 # Display the current git revision in the info block.
 build --stamp --workspace_status_command tools/workspace_status.sh
 
+# By default, disable sandboxed execution for tests. This is because there are
+# bugs in the sandbox mode that can occasionally result in wrong permissions.
+test --spawn_strategy=local
+
 # Enable remote execution so actions are performed on the remote systems.
 build:remote --remote_executor=grpcs://remotebuildexecution.googleapis.com
 build:remote --bes_backend=buildeventservice.googleapis.com

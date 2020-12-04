@@ -265,15 +265,57 @@ func TestWithDUT(ctx context.Context, t *testing.T, mkDevice func(*dockerutil.Co
 		t.Fatalf("failed to marshal %v into json: %s", dutTestNets, err)
 	}
 
-	snifferProg := "tcpdump"
+	baseSnifferArgs := []string{
+		"tcpdump",
+		"-vvv",
+		"--absolute-tcp-sequence-numbers",
+		"--packet-buffered",
+		// Disable DNS resolution.
+		"-n",
+		// run tcpdump as root since the output directory is owned by root. From
+		// `man tcpdump`:
+		//
+		// -Z user
+		// --relinquish-privileges=user
+		//        If tcpdump is running as root, after opening the capture device
+		//        or input savefile, change the user ID to user and the group ID to
+		//        the primary group of user.
+		// This behavior is enabled by default (-Z tcpdump), and can be
+		// disabled by -Z root.
+		"-Z", "root",
+	}
 	if tshark {
-		snifferProg = "tshark"
+		baseSnifferArgs = []string{
+			"tshark",
+			"-V",
+			"-o", "tcp.check_checksum:TRUE",
+			"-o", "udp.check_checksum:TRUE",
+			// Disable buffering.
+			"-l",
+			// Disable DNS resolution.
+			"-n",
+		}
 	}
 	for _, n := range dutTestNets {
-		_, err := testbenchContainer.ExecProcess(ctx, dockerutil.ExecOpts{}, snifferArgs(n.LocalDevName)...)
+		snifferArgs := append(baseSnifferArgs, "-i", n.LocalDevName)
+		if !tshark {
+			snifferArgs = append(
+				snifferArgs,
+				"-w",
+				filepath.Join(testOutputDir, fmt.Sprintf("%s.pcap", n.LocalDevName)),
+			)
+		}
+		p, err := testbenchContainer.ExecProcess(ctx, dockerutil.ExecOpts{}, snifferArgs...)
 		if err != nil {
 			t.Fatalf("failed to start exec a sniffer on %s: %s", n.LocalDevName, err)
 		}
+		t.Cleanup(func() {
+			if snifferOut, err := p.Logs(); err != nil {
+				t.Errorf("sniffer logs failed: %s\n%s", err, snifferOut)
+			} else {
+				t.Logf("sniffer logs:\n%s", snifferOut)
+			}
+		})
 		// When the Linux kernel receives a SYN-ACK for a SYN it didn't send, it
 		// will respond with an RST. In most packetimpact tests, the SYN is sent
 		// by the raw socket, the kernel knows nothing about the connection, this
@@ -292,7 +334,7 @@ func TestWithDUT(ctx context.Context, t *testing.T, mkDevice func(*dockerutil.Co
 		// any packets. On linux tests killing it immediately can
 		// sometimes result in partial pcaps.
 		time.Sleep(1 * time.Second)
-		if logs, err := testbenchContainer.Exec(ctx, dockerutil.ExecOpts{}, "killall", snifferProg); err != nil {
+		if logs, err := testbenchContainer.Exec(ctx, dockerutil.ExecOpts{}, "killall", baseSnifferArgs[0]); err != nil {
 			t.Errorf("failed to kill all sniffers: %s, logs: %s", err, logs)
 		}
 	})
@@ -548,25 +590,4 @@ func mountTempDirectory(t *testing.T, runOpts *dockerutil.RunOpts, hostDirTempla
 		ReadOnly: false,
 	})
 	return tmpDir, nil
-}
-
-// snifferArgs returns the correct command line to run sniffer on the testbench.
-func snifferArgs(devName string) []string {
-	if tshark {
-		// Run tshark in the test bench unbuffered, without DNS resolution, just
-		// on the interface with the test packets.
-		return []string{
-			"tshark", "-V", "-l", "-n", "-i", devName,
-			"-o", "tcp.check_checksum:TRUE",
-			"-o", "udp.check_checksum:TRUE",
-		}
-	}
-	// Run tcpdump in the test bench unbuffered, without DNS resolution, just
-	// on the interface with the test packets.
-	return []string{
-		"tcpdump",
-		"-S", "-vvv", "-U", "-n",
-		"-i", devName,
-		"-w", filepath.Join(testOutputDir, fmt.Sprintf("%s.pcap", devName)),
-	}
 }

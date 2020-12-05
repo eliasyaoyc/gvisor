@@ -2448,3 +2448,74 @@ func TestOutgoingSubnetBroadcast(t *testing.T) {
 		})
 	}
 }
+
+func TestReceiveShortLength(t *testing.T) {
+	flows := []testFlow{unicastV4, unicastV6}
+	for _, flow := range flows {
+		t.Run(flow.String(), func(t *testing.T) {
+			c := newDualTestContext(t, defaultMTU)
+			defer c.cleanup()
+
+			c.createEndpointForFlow(flow)
+
+			// Bind to wildcard.
+			if err := c.ep.Bind(tcpip.FullAddress{Port: stackPort}); err != nil {
+				c.t.Fatalf("Bind failed: %s", err)
+			}
+
+			payload := newPayload()
+			extraBytes := []byte{1, 2, 3, 4}
+			h := flow.header4Tuple(incoming)
+			var buf buffer.View
+			var proto tcpip.NetworkProtocolNumber
+
+			// Build packets with extra bytes not accounted for in the UDP length
+			// field.
+			if flow.isV4() {
+				buf = c.buildV4Packet(payload, &h)
+				buf = append(buf, extraBytes...)
+				ip := header.IPv4(buf)
+				ip.SetTotalLength(ip.TotalLength() + uint16(len(extraBytes)))
+				ip.SetChecksum(0)
+				ip.SetChecksum(^ip.CalculateChecksum())
+				proto = ipv4.ProtocolNumber
+			} else {
+				buf = c.buildV6Packet(payload, &h)
+				buf = append(buf, extraBytes...)
+				ip := header.IPv6(buf)
+				ip.SetPayloadLength(ip.PayloadLength() + uint16(len(extraBytes)))
+				proto = ipv6.ProtocolNumber
+			}
+
+			c.linkEP.InjectInbound(proto, stack.NewPacketBuffer(stack.PacketBufferOptions{
+				Data: buf.ToVectorisedView(),
+			}))
+
+			// Try to receive the data.
+			we, ch := waiter.NewChannelEntry(nil)
+			c.wq.EventRegister(&we, waiter.EventIn)
+			defer c.wq.EventUnregister(&we)
+
+			var addr tcpip.FullAddress
+			v, _, err := c.ep.Read(&addr)
+			if err == tcpip.ErrWouldBlock {
+				// Wait for data to become available.
+				select {
+				case <-ch:
+					v, _, err = c.ep.Read(&addr)
+				case <-time.After(300 * time.Millisecond):
+					t.Fatal("timed out waiting for data")
+				}
+			}
+			if err != nil {
+				t.Fatalf("c.ep.Read(..): %s", err)
+			}
+
+			// Check the payload is read back without extra bytes.
+			if !bytes.Equal(payload, v) {
+				c.t.Fatalf("got payload = %x, want = %x", v, payload)
+			}
+		})
+	}
+
+}

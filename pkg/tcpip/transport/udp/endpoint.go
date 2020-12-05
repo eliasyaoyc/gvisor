@@ -1276,6 +1276,8 @@ func (e *endpoint) HandlePacket(id stack.TransportEndpointID, pkt *stack.PacketB
 		return
 	}
 
+	pkt.Data.CapLength(int(hdr.Length()) - header.UDPMinimumSize)
+
 	if !verifyChecksum(hdr, pkt) {
 		// Checksum Error.
 		e.stack.Stats().UDP.ChecksumErrors.Increment()

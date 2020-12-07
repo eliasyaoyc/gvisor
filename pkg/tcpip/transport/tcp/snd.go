@@ -137,6 +137,9 @@ type sender struct {
 	// that have been sent but not yet acknowledged.
 	outstanding int
 
+	// sackedOut is the number of packets which are selectively acked.
+	sackedOut int
+
 	// sndWnd is the send window size.
 	sndWnd seqnum.Size
 
@@ -372,6 +375,7 @@ func (s *sender) updateMaxPayloadSize(mtu, count int) {
 		m = 1
 	}
 
+	oldMSS := s.maxPayloadSize
 	s.maxPayloadSize = m
 	if s.gso {
 		s.ep.gso.MSS = uint16(m)
@@ -394,6 +398,7 @@ func (s *sender) updateMaxPayloadSize(mtu, count int) {
 
 	// Rewind writeNext to the first segment exceeding the MTU. Do nothing
 	// if it is already before such a packet.
+	nextSeg := s.writeNext
 	for seg := s.writeList.Front(); seg != nil; seg = seg.Next() {
 		if seg == s.writeNext {
 			// We got to writeNext before we could find a segment
@@ -401,16 +406,28 @@ func (s *sender) updateMaxPayloadSize(mtu, count int) {
 			break
 		}
 
-		if seg.data.Size() > m {
+		if nextSeg == s.writeNext && seg.data.Size() > m {
 			// We found a segment exceeding the MTU. Rewind
 			// writeNext and try to retransmit it.
-			s.writeNext = seg
-			break
+			nextSeg = seg
+		}
+
+		if s.ep.sackPermitted && s.ep.scoreboard.IsSACKED(seg.sackBlock()) {
+			// Decrement sackedOut for old mss.
+			size := seg.data.Size()
+			count := 0
+			if size == 0 {
+				count = 1
+			}
+			count = (size-1)/oldMSS + 1
+			s.sackedOut -= count
+			s.sackedOut += s.pCount(seg)
 		}
 	}
 
 	// Since we likely reduced the number of outstanding packets, we may be
 	// ready to send some more.
+	s.writeNext = nextSeg
 	s.sendData()
 }
 
@@ -1207,6 +1224,7 @@ func (s *sender) walkSACK(rcvdSeg *segment) {
 				s.rc.update(seg, rcvdSeg, s.ep.tsOffset)
 				s.rc.detectReorder(seg)
 				seg.acked = true
+				s.sackedOut += s.pCount(seg)
 			}
 			seg = seg.Next()
 		}
@@ -1404,6 +1422,8 @@ func (s *sender) handleRcvdSegment(rcvdSeg *segment) {
 			// already been accounted for in SetPipe().
 			if !s.ep.sackPermitted || !s.ep.scoreboard.IsSACKED(seg.sackBlock()) {
 				s.outstanding -= s.pCount(seg)
+			} else {
+				s.sackedOut -= s.pCount(seg)
 			}
 			seg.decRef()
 			ackLeft -= datalen

@@ -20,6 +20,7 @@
 #include <atomic>
 #include <cerrno>
 #include <ctime>
+#include <stack>
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
@@ -774,8 +775,24 @@ TEST(SemaphoreTest, SemopGetncntOnSignal_NoRandomSave) {
 }
 
 TEST(SemaphoreTest, IpcInfo) {
+  std::stack<int> sem_ids;
   struct seminfo info;
-  ASSERT_THAT(semctl(0, 0, IPC_INFO, &info), SyscallSucceeds());
+  for (int i = 0; i < 3; i++) {
+    int sem_id = 0;
+    ASSERT_THAT(sem_id = semget(IPC_PRIVATE, 1, 0600 | IPC_CREAT),
+                SyscallSucceeds());
+    sem_ids.push(sem_id);
+    EXPECT_THAT(semctl(0, 0, IPC_INFO, &info), SyscallSucceedsWithValue(i));
+  }
+  while (!sem_ids.empty()) {
+    int sem_id = sem_ids.top();
+    sem_ids.pop();
+    ASSERT_THAT(semctl(sem_id, 0, IPC_RMID), SyscallSucceeds());
+    int index = sem_ids.size() - 1;
+    EXPECT_THAT(semctl(0, 0, IPC_INFO, &info),
+                SyscallSucceedsWithValue(index >= 0 ? index : 0));
+  }
+  ASSERT_THAT(semctl(0, 0, IPC_INFO, &info), SyscallSucceedsWithValue(0));
 
   EXPECT_EQ(info.semmap, 1024000000);
   EXPECT_EQ(info.semmni, 32000);
@@ -786,6 +803,51 @@ TEST(SemaphoreTest, IpcInfo) {
   EXPECT_EQ(info.semume, 500);
   EXPECT_EQ(info.semvmx, 32767);
   EXPECT_EQ(info.semaem, 32767);
+}
+
+TEST(SemaphoreTest, SemInfo) {
+  std::stack<int> sem_ids;
+  struct seminfo info;
+  constexpr int kSemSetSize = 10;
+  for (int i = 0; i < 3; i++) {
+    int sem_id = 0;
+    ASSERT_THAT(sem_id = semget(IPC_PRIVATE, kSemSetSize, 0600 | IPC_CREAT),
+                SyscallSucceeds());
+    sem_ids.push(sem_id);
+    int sem_sets_count = sem_ids.size();
+    int sems_count = sem_sets_count * kSemSetSize;
+    EXPECT_THAT(semctl(0, 0, SEM_INFO, &info), SyscallSucceedsWithValue(i));
+    EXPECT_EQ(info.semmap, 1024000000);
+    EXPECT_EQ(info.semmni, 32000);
+    EXPECT_EQ(info.semmns, 1024000000);
+    EXPECT_EQ(info.semmnu, 1024000000);
+    EXPECT_EQ(info.semmsl, 32000);
+    EXPECT_EQ(info.semopm, 500);
+    EXPECT_EQ(info.semume, 500);
+    EXPECT_EQ(info.semusz, sem_sets_count);
+    EXPECT_EQ(info.semvmx, 32767);
+    EXPECT_EQ(info.semaem, sems_count);
+  }
+  while (!sem_ids.empty()) {
+    int sem_id = sem_ids.top();
+    sem_ids.pop();
+    ASSERT_THAT(semctl(sem_id, 0, IPC_RMID), SyscallSucceeds());
+    int index = sem_ids.size() - 1;
+    int sem_sets_count = sem_ids.size();
+    int sems_count = sem_sets_count * kSemSetSize;
+    EXPECT_THAT(semctl(0, 0, SEM_INFO, &info),
+                SyscallSucceedsWithValue(index >= 0 ? index : 0));
+    EXPECT_EQ(info.semmap, 1024000000);
+    EXPECT_EQ(info.semmni, 32000);
+    EXPECT_EQ(info.semmns, 1024000000);
+    EXPECT_EQ(info.semmnu, 1024000000);
+    EXPECT_EQ(info.semmsl, 32000);
+    EXPECT_EQ(info.semopm, 500);
+    EXPECT_EQ(info.semume, 500);
+    EXPECT_EQ(info.semusz, sem_sets_count);
+    EXPECT_EQ(info.semvmx, 32767);
+    EXPECT_EQ(info.semaem, sems_count);
+  }
 }
 
 }  // namespace
